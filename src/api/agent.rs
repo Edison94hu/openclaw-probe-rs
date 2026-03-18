@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
@@ -146,6 +146,11 @@ fn get_instance_or_404(
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct LatestReleaseQuery {
+    pub force_refresh: Option<bool>,
+}
 
 // GET /api/health
 pub async fn probe_health() -> Json<Value> {
@@ -439,10 +444,12 @@ pub async fn agent_openclaw_version() -> Json<Value> {
 }
 
 // GET /api/agent/openclaw/latest-release
-pub async fn agent_openclaw_latest_release() -> Json<Value> {
+pub async fn agent_openclaw_latest_release(
+    Query(query): Query<LatestReleaseQuery>,
+) -> Json<Value> {
     Json(json!({
         "status": "ok",
-        "release": operations::get_openclaw_latest_release(false).await,
+        "release": operations::get_openclaw_latest_release(query.force_refresh.unwrap_or(false)).await,
     }))
 }
 

@@ -185,6 +185,88 @@ fn locate_openclaw_package_dir(npm_root: &str) -> Option<PathBuf> {
     None
 }
 
+fn locate_openclaw_package_dir_from_entry(entry_path: &Path) -> Option<PathBuf> {
+    let resolved = std::fs::canonicalize(entry_path).ok()?;
+
+    if resolved.join("package.json").exists() {
+        return Some(resolved);
+    }
+
+    let parent = resolved.parent()?;
+    if parent.join("package.json").exists() {
+        return Some(parent.to_path_buf());
+    }
+
+    if let Some(grandparent) = parent.parent() {
+        if grandparent.join("package.json").exists() {
+            return Some(grandparent.to_path_buf());
+        }
+    }
+
+    None
+}
+
+fn locate_openclaw_package_dir_from_path_env() -> Option<PathBuf> {
+    let path_env = std::env::var("PATH").ok()?;
+    for dir in path_env.split(':').filter(|s| !s.is_empty()) {
+        let dir_path = PathBuf::from(dir);
+        let entries = match std::fs::read_dir(&dir_path) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.contains("openclaw") {
+                continue;
+            }
+            if let Some(package_dir) = locate_openclaw_package_dir_from_entry(&entry.path()) {
+                return Some(package_dir);
+            }
+        }
+    }
+    None
+}
+
+fn extract_backticked_value(body: &str, marker: &str) -> Option<String> {
+    let start = body.find(marker)?;
+    let rest = &body[start + marker.len()..];
+    let tick_start = rest.find('`')?;
+    let rest = &rest[tick_start + 1..];
+    let tick_end = rest.find('`')?;
+    Some(rest[..tick_end].trim().to_string())
+}
+
+fn extract_release_version(payload: &Value) -> (Option<String>, Option<String>) {
+    let release_name_version = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(normalize_version)
+        .filter(|s| !s.is_empty());
+    let release_tag_version = payload
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(normalize_version)
+        .filter(|s| !s.is_empty());
+    let body_version = payload
+        .get("body")
+        .and_then(|v| v.as_str())
+        .and_then(|body| {
+            extract_backticked_value(body, "The corresponding npm version is still ")
+                .or_else(|| extract_backticked_value(body, "corresponding npm version is still "))
+        })
+        .as_deref()
+        .map(normalize_version)
+        .filter(|s| !s.is_empty());
+
+    if let Some(version) = body_version {
+        return (Some(version), Some("release-notes".to_string()));
+    }
+    if let Some(version) = release_name_version {
+        return (Some(version), Some("release-name".to_string()));
+    }
+    (release_tag_version, Some("release-tag".to_string()))
+}
+
 fn read_json_file(path: &Path) -> Option<Value> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
@@ -198,7 +280,12 @@ pub async fn get_openclaw_install_info() -> Value {
     let version = run_cmd(&["openclaw", "--version"], 20).await;
     let which_openclaw = run_cmd(&["which", "openclaw"], 20).await;
     let npm_root = run_cmd(&["npm", "root", "-g"], 20).await;
+    let npm_prefix = run_cmd(&["npm", "prefix", "-g"], 20).await;
     let npm_root_path = npm_root
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let npm_prefix_path = npm_prefix
         .get("stdout")
         .and_then(|v| v.as_str())
         .map(str::to_string);
@@ -227,51 +314,69 @@ pub async fn get_openclaw_install_info() -> Value {
         None
     };
 
-    if let Some(root) = npm_root_path.as_deref() {
-        if let Some(package_dir) = locate_openclaw_package_dir(root) {
-            install_strategy = "npm-global";
-            npm_package_dir = Some(package_dir.to_string_lossy().to_string());
+    let mut package_dir = npm_root_path
+        .as_deref()
+        .and_then(locate_openclaw_package_dir)
+        .or_else(|| {
+            npm_prefix_path
+                .as_deref()
+                .map(PathBuf::from)
+                .map(|prefix| prefix.join("lib").join("node_modules"))
+                .filter(|root| root.exists())
+                .and_then(|root| locate_openclaw_package_dir(root.to_string_lossy().as_ref()))
+        })
+        .or_else(|| {
+            openclaw_path
+                .as_deref()
+                .map(PathBuf::from)
+                .as_deref()
+                .and_then(locate_openclaw_package_dir_from_entry)
+        })
+        .or_else(locate_openclaw_package_dir_from_path_env);
 
-            if openclaw_path.is_none() {
-                let entry = package_dir.join("openclaw.mjs");
-                if entry.exists() {
-                    openclaw_path = Some(entry.to_string_lossy().to_string());
-                }
+    if let Some(package_dir) = package_dir.take() {
+        install_strategy = "npm-global";
+        npm_package_dir = Some(package_dir.to_string_lossy().to_string());
+
+        if openclaw_path.is_none() {
+            let entry = package_dir.join("openclaw.mjs");
+            if entry.exists() {
+                openclaw_path = Some(entry.to_string_lossy().to_string());
             }
+        }
 
-            if openclaw_version.is_none() || version_full.is_empty() {
-                let build_info = read_json_file(&package_dir.join("dist").join("build-info.json"));
-                let package_info = read_json_file(&package_dir.join("package.json"));
-                let detected_version = build_info
-                    .as_ref()
-                    .and_then(|v| v.get("version"))
-                    .and_then(|v| v.as_str())
-                    .map(normalize_version)
-                    .or_else(|| {
-                        package_info
-                            .as_ref()
-                            .and_then(|v| v.get("version"))
-                            .and_then(|v| v.as_str())
-                            .map(normalize_version)
-                    });
-                if openclaw_version.is_none() {
-                    openclaw_version = detected_version.clone();
-                }
-                if version_full.is_empty() {
-                    version_full = match (
-                        detected_version,
-                        build_info
-                            .as_ref()
-                            .and_then(|v| v.get("commit"))
-                            .and_then(|v| v.as_str()),
-                    ) {
-                        (Some(v), Some(commit)) if !commit.is_empty() => {
-                            format!("OpenClaw {} ({})", v, &commit[..7.min(commit.len())])
-                        }
-                        (Some(v), _) => format!("OpenClaw {}", v),
-                        _ => String::new(),
-                    };
-                }
+        if openclaw_version.is_none() || version_full.is_empty() {
+            let build_info = read_json_file(&package_dir.join("dist").join("build-info.json"));
+            let package_info = read_json_file(&package_dir.join("package.json"));
+            let detected_version = build_info
+                .as_ref()
+                .and_then(|v| v.get("version"))
+                .and_then(|v| v.as_str())
+                .map(normalize_version)
+                .or_else(|| {
+                    package_info
+                        .as_ref()
+                        .and_then(|v| v.get("version"))
+                        .and_then(|v| v.as_str())
+                        .map(normalize_version)
+                });
+            if openclaw_version.is_none() {
+                openclaw_version = detected_version.clone();
+            }
+            if version_full.is_empty() {
+                version_full = match (
+                    detected_version,
+                    build_info
+                        .as_ref()
+                        .and_then(|v| v.get("commit"))
+                        .and_then(|v| v.as_str()),
+                ) {
+                    (Some(v), Some(commit)) if !commit.is_empty() => {
+                        format!("OpenClaw {} ({})", v, &commit[..7.min(commit.len())])
+                    }
+                    (Some(v), _) => format!("OpenClaw {}", v),
+                    _ => String::new(),
+                };
             }
         }
     }
@@ -319,10 +424,12 @@ pub async fn get_openclaw_latest_release(_force_refresh: bool) -> Value {
         "repo": "openclaw/openclaw",
         "release_url": release_url,
         "api_url": api_url,
+        "install_strategy": install_strategy,
         "current_version": current_version,
         "latest_version": null,
         "latest_tag": null,
         "latest_name": null,
+        "latest_version_source": null,
         "published_at": null,
         "html_url": release_url,
         "prerelease": null,
@@ -334,6 +441,15 @@ pub async fn get_openclaw_latest_release(_force_refresh: bool) -> Value {
         "package_update_available": null,
         "install_target_version": null,
         "install_target_source": null,
+        "upgrade_supported": install_strategy == "npm-global",
+        "upgrade_blocked_reason": if install_strategy == "npm-global" {
+            Value::Null
+        } else {
+            json!(format!(
+                "Unsupported install strategy: {}. Only npm-global upgrades are supported right now.",
+                install_strategy
+            ))
+        },
         "update_available": null,
         "fetched_at": now_iso(),
         "error": null,
@@ -351,14 +467,13 @@ pub async fn get_openclaw_latest_release(_force_refresh: bool) -> Value {
         Ok(resp) => {
             if let Ok(payload) = resp.json::<Value>().await {
                 let latest_tag = payload.get("tag_name").and_then(|v| v.as_str());
-                let latest_version = latest_tag
-                    .or_else(|| payload.get("name").and_then(|v| v.as_str()))
-                    .map(normalize_version);
+                let (latest_version, latest_version_source) = extract_release_version(&payload);
 
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert("latest_version".into(), json!(latest_version));
                     obj.insert("latest_tag".into(), json!(latest_tag));
                     obj.insert("latest_name".into(), json!(payload.get("name")));
+                    obj.insert("latest_version_source".into(), json!(latest_version_source));
                     obj.insert("published_at".into(), json!(payload.get("published_at")));
                     obj.insert(
                         "html_url".into(),
@@ -405,9 +520,9 @@ pub async fn get_openclaw_latest_release(_force_refresh: bool) -> Value {
                 )
             } else {
                 (
-                    release_version.clone(),
-                    Some("github-release".to_string()),
-                    release_update_available,
+                    None,
+                    None,
+                    Some(false),
                 )
             };
 
@@ -1023,6 +1138,45 @@ pub async fn create_upgrade_task(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    let install_info = get_openclaw_install_info().await;
+    let install_strategy = install_info
+        .get("install_strategy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    if install_strategy != "npm-global" {
+        let message = format!(
+            "Unsupported install strategy: {}. Only npm-global upgrades are supported right now.",
+            install_strategy
+        );
+        let _ = database::insert_event(
+            &state.db,
+            "upgrade_skipped",
+            &message,
+            None,
+            None,
+        )
+        .await;
+        update_task(
+            &task_id,
+            &[
+                ("status", json!("success")),
+                ("started_at", json!(now_iso())),
+                ("result", json!({
+                    "skipped": true,
+                    "reason": "unsupported_install_strategy",
+                    "install_strategy": install_strategy,
+                    "current_version": install_info.get("openclaw_version"),
+                    "upgrade_supported": false,
+                })),
+                ("finished_at", json!(now_iso())),
+            ],
+        )
+        .await;
+        return task;
+    }
+
     launch_task(task_id, move || async move {
         perform_upgrade(&state, &target_version, create_backup, rollback_on_failure).await
     });
@@ -1052,6 +1206,36 @@ pub async fn create_upgrade_if_needed_task(
 
     launch_task(task_id, move || async move {
         let release = get_openclaw_latest_release(force_refresh_release).await;
+        let upgrade_supported = release
+            .get("upgrade_supported")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !upgrade_supported {
+            let install_strategy = release
+                .get("install_strategy")
+                .and_then(|v| v.as_str());
+            let blocked_reason = release
+                .get("upgrade_blocked_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Upgrade is not supported for the current install strategy");
+            let _ = database::insert_event(
+                &state.db,
+                "upgrade_skipped",
+                blocked_reason,
+                None,
+                None,
+            )
+            .await;
+            return Ok(json!({
+                "skipped": true,
+                "reason": "unsupported_install_strategy",
+                "install_strategy": install_strategy,
+                "current_version": release.get("current_version"),
+                "latest_version": release.get("latest_version"),
+                "release": release,
+            }));
+        }
+
         if let Some(err) = release.get("error").and_then(|v| v.as_str()) {
             anyhow::bail!("Failed to check latest release: {}", err);
         }
