@@ -222,7 +222,8 @@ fn format_ts_ms(ts_ms: Option<i64>) -> Value {
     match ts_ms {
         Some(ms) if ms > 0 => {
             let secs = ms / 1000;
-            let dt = chrono::DateTime::from_timestamp(secs, 0);
+            let dt = chrono::DateTime::from_timestamp(secs, 0)
+                .map(|d| d.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()));
             match dt {
                 Some(d) => json!(d.format("%Y-%m-%d %H:%M:%S").to_string()),
                 None => Value::Null,
@@ -253,6 +254,10 @@ fn humanize_delta_ms(ts_ms: Option<i64>) -> Value {
         }
         _ => Value::Null,
     }
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 fn schedule_label(schedule: &Value) -> String {
@@ -315,10 +320,10 @@ fn build_cron_display_fields(job: &Value) -> Value {
         .get("summary")
         .and_then(|v| v.as_str())
         .map(|s| {
-            if s.len() > 240 {
-                &s[..240]
+            if s.chars().count() > 240 {
+                truncate_chars(s, 240)
             } else {
-                s
+                s.to_string()
             }
         })
         .filter(|s| !s.is_empty());

@@ -91,22 +91,6 @@ fn default_wait_after_restart() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AlertConfig {
-    #[serde(default)]
-    pub feishu_webhook: String,
-    #[serde(default)]
-    pub enabled: bool,
-}
-impl Default for AlertConfig {
-    fn default() -> Self {
-        Self {
-            feishu_webhook: String::new(),
-            enabled: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenScanConfig {
     #[serde(default = "default_token_interval")]
     pub interval_minutes: u64,
@@ -200,8 +184,6 @@ pub struct AppConfig {
     pub probe: ProbeConfig,
     #[serde(default)]
     pub restart: RestartConfig,
-    #[serde(default)]
-    pub alert: AlertConfig,
     #[serde(default)]
     pub token_scan: TokenScanConfig,
     #[serde(default)]

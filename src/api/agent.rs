@@ -2,7 +2,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -89,59 +88,15 @@ async fn cached_payload(
     (value, meta)
 }
 
-// ---------------------------------------------------------------------------
-// OpenClaw version (cached)
-// ---------------------------------------------------------------------------
-
-static VERSION_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
-
-fn get_openclaw_version() -> Value {
-    {
-        let guard = VERSION_CACHE.lock().unwrap();
-        if let Some((ref ts, ref val)) = *guard {
-            if ts.elapsed().as_secs() < 30 {
-                return val.clone();
-            }
-        }
-    }
-
-    let mut result = json!({
-        "openclaw_version": null,
-        "openclaw_version_full": null,
-    });
-
-    if let Ok(output) = Command::new("openclaw").arg("--version").output() {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let text = if text.is_empty() {
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
-        } else {
-            text
-        };
-        if !text.is_empty() {
-            if let Some(obj) = result.as_object_mut() {
-                obj.insert("openclaw_version_full".into(), json!(&text));
-                let parts: Vec<&str> = text.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    obj.insert("openclaw_version".into(), json!(parts[1]));
-                }
-            }
-        }
-    }
-
-    let mut guard = VERSION_CACHE.lock().unwrap();
-    *guard = Some((Instant::now(), result.clone()));
-    result
-}
-
-fn build_host_meta(config: &crate::config::AppConfig) -> Value {
-    let version_info = get_openclaw_version();
+async fn build_host_meta(config: &crate::config::AppConfig) -> Value {
+    let install_info = operations::get_openclaw_install_info().await;
     json!({
         "agent_name": config.agent.name,
         "site": config.agent.site,
         "hostname": hostname::get().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
         "service_version": "1.0.0",
-        "openclaw_version": version_info.get("openclaw_version"),
-        "openclaw_version_full": version_info.get("openclaw_version_full"),
+        "openclaw_version": install_info.get("openclaw_version"),
+        "openclaw_version_full": install_info.get("openclaw_version_full"),
         "server_time": now_epoch(),
     })
 }
@@ -192,6 +147,14 @@ fn get_instance_or_404(
 // Endpoints
 // ---------------------------------------------------------------------------
 
+// GET /api/health
+pub async fn probe_health() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "openclaw-probe",
+    }))
+}
+
 // GET /api/agent/health
 pub async fn agent_health(State(state): State<SharedState>) -> Json<Value> {
     let start = Instant::now();
@@ -213,7 +176,7 @@ pub async fn agent_health(State(state): State<SharedState>) -> Json<Value> {
         "status": "ok",
         "service": "openclaw-probe-agent",
         "process_uptime_seconds": (uptime * 100.0).round() / 100.0,
-        "host": build_host_meta(&config),
+        "host": build_host_meta(&config).await,
         "system": system_metrics::get_system_metrics(false),
         "maintenance_mode": maintenance,
         "instances_total": instances.len(),
@@ -275,7 +238,7 @@ pub async fn agent_snapshot(State(state): State<SharedState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "openclaw-probe-agent",
-        "host": build_host_meta(&config),
+        "host": build_host_meta(&config).await,
         "system": system_metrics::get_system_metrics(false),
         "config": {
             "probe": serde_json::to_value(&config.probe).unwrap_or_default(),
@@ -538,20 +501,74 @@ pub async fn agent_create_backup(
     Json(json!({ "status": "accepted", "task": task }))
 }
 
-// POST /api/agent/openclaw/upgrade  (simplified — returns not-implemented)
-pub async fn agent_upgrade_openclaw(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({
-        "status": "error",
-        "detail": "Upgrade via API not yet implemented in Rust agent. Use npm directly.",
-    }))
+// POST /api/agent/backups/:backup_id/restore
+pub async fn agent_restore_backup(
+    State(state): State<SharedState>,
+    Path(backup_id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    let start_after_restore = payload
+        .get("start_after_restore")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let task = operations::create_restore_task(state, backup_id, start_after_restore).await;
+    Json(json!({ "status": "accepted", "task": task }))
 }
 
-// POST /api/agent/openclaw/upgrade-if-needed  (simplified)
-pub async fn agent_upgrade_if_needed(Json(_payload): Json<Value>) -> Json<Value> {
-    let release = operations::get_openclaw_latest_release(true).await;
-    Json(json!({
-        "status": "ok",
-        "release": release,
-        "detail": "Version check completed. Automated upgrade not yet implemented in Rust agent.",
-    }))
+// POST /api/agent/openclaw/upgrade
+pub async fn agent_upgrade_openclaw(
+    State(state): State<SharedState>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    let target_version = payload
+        .get("target_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("latest")
+        .trim()
+        .to_string();
+    let create_backup = payload
+        .get("create_backup")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let rollback_on_failure = payload
+        .get("rollback_on_failure")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let task = operations::create_upgrade_task(
+        state,
+        target_version,
+        create_backup,
+        rollback_on_failure,
+    )
+    .await;
+    Json(json!({ "status": "accepted", "task": task }))
+}
+
+// POST /api/agent/openclaw/upgrade-if-needed
+pub async fn agent_upgrade_if_needed(
+    State(state): State<SharedState>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    let create_backup = payload
+        .get("create_backup")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let rollback_on_failure = payload
+        .get("rollback_on_failure")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let force_refresh_release = payload
+        .get("force_refresh_release")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let task = operations::create_upgrade_if_needed_task(
+        state,
+        create_backup,
+        rollback_on_failure,
+        force_refresh_release,
+    )
+    .await;
+    Json(json!({ "status": "accepted", "task": task }))
 }

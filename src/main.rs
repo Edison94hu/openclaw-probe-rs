@@ -102,7 +102,7 @@ fn build_router(state: SharedState) -> Router {
             get(api::tokens::token_agent_heatmap),
         )
         .route("/tokens/pricing", get(api::tokens::get_pricing))
-        .route("/health", get(api::agent::agent_health));
+        .route("/health", get(api::agent::probe_health));
 
     // Auth-protected routes
     let authed_api = Router::new()
@@ -171,6 +171,10 @@ fn build_router(state: SharedState) -> Router {
         .route(
             "/agent/backups/create",
             post(api::agent::agent_create_backup),
+        )
+        .route(
+            "/agent/backups/{backup_id}/restore",
+            post(api::agent::agent_restore_backup),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

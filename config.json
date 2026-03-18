@@ -20,10 +20,6 @@
     "window_minutes": 10,
     "wait_after_restart_seconds": 20
   },
-  "alert": {
-    "feishu_webhook": "",
-    "enabled": false
-  },
   "token_scan": {
     "interval_minutes": 5
   },
