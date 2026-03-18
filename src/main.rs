@@ -19,7 +19,7 @@ use axum::Router;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use config::{now_epoch, AppState, ConfigManager, SharedState};
+use config::{AppState, ConfigManager, SharedState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,7 +50,6 @@ async fn main() -> anyhow::Result<()> {
         db: pool,
         instance_states: RwLock::new(std::collections::HashMap::new()),
         started_at: Instant::now(),
-        started_at_epoch: now_epoch(),
     });
 
     // Start background scheduler

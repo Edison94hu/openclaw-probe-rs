@@ -293,7 +293,6 @@ pub struct AppState {
     pub db: sqlx::SqlitePool,
     pub instance_states: RwLock<std::collections::HashMap<String, InstanceState>>,
     pub started_at: std::time::Instant,
-    pub started_at_epoch: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
