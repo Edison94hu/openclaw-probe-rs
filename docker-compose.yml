@@ -1,0 +1,14 @@
+services:
+  probe:
+    build: .
+    container_name: openclaw-probe
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./data:/app/data
+      - ~/.openclaw:/root/.openclaw:ro
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    network_mode: host

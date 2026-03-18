@@ -1,0 +1,43 @@
+{
+  "instances": [
+    {
+      "name": "主助手",
+      "port": 18789,
+      "profile": null,
+      "openclaw_home": "~/.openclaw",
+      "enabled": true
+    }
+  ],
+  "probe": {
+    "interval_seconds": 30,
+    "timeout_seconds": 5,
+    "failure_threshold": 2,
+    "retry_delay_seconds": 10
+  },
+  "restart": {
+    "enabled": true,
+    "max_restarts_per_window": 3,
+    "window_minutes": 10,
+    "wait_after_restart_seconds": 20
+  },
+  "alert": {
+    "feishu_webhook": "",
+    "enabled": false
+  },
+  "token_scan": {
+    "interval_minutes": 5
+  },
+  "agent": {
+    "name": "mac-mini-agent",
+    "site": "",
+    "api_token": ""
+  },
+  "operations": {
+    "backup_dir": "~/openclaw-agent-backups",
+    "max_backups": 10
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000
+  }
+}
